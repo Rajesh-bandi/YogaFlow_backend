@@ -285,7 +285,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log("[assessment] Incoming request body:", req.body);
       const assessment = insertAssessmentSchema.parse(req.body);
       // Forward assessment to ML API
-      const mlApiUrl = "https://web-production-ca02e.up.railway.app/recommend";
+    const mlApiUrl = "https://ml-recommendation-2ywv.onrender.com/recommend";
       console.log('[DEBUG] ML API URL:', mlApiUrl);
       console.log('[DEBUG] ML API payload:', assessment);
       const mlResponse = await fetch(mlApiUrl, {
