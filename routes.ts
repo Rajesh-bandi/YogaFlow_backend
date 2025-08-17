@@ -6,159 +6,99 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { sendExerciseReminderEmail, sendLoginThanksEmail, verifyMailConfig, sendTestEmail, sendSignupOtpEmail, sendRoutineCompletionEmail } from "./mailer";
 import { getDb } from "./mongo";
-import { insertAssessmentSchema, insertUserProgressSchema, insertUserSchema } from "./schema";
+import { insertAssessmentSchema, insertUserProgressSchema, insertUserSchema } from "@shared/schema";
 import bcrypt from "bcrypt";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Serve yoga images statically
   app.use('/api/yoga', express.static(path.resolve(__dirname, 'yoga')));
 
-  // Get completion rate for a user's routines for a specific day
-  app.get("/api/progress/daily/:userId", async (req: express.Request, res: express.Response) => {
-    try {
-  const db = getDb();
-  if (!db) return res.status(500).json({ message: "Database not available" });
-  const { userId } = req.params;
-  const date = req.query.date || new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
-  // Find today's recommended routine for this user
-  const routineDoc = await db.collection("recommended_poses").findOne({ userId });
-  const total = routineDoc?.poses?.length || 0;
-  // Find all user progress for this user and date
-  const progressDocs = await db.collection("user_progress").find({ userId }).toArray();
-  // Only count completed poses for today
-  const todayProgress = progressDocs.filter(doc => {
-    const completedAt = doc.completedAt ? new Date(doc.completedAt) : null;
-    if (!completedAt) return false;
-    const y = completedAt.getFullYear(), m = completedAt.getMonth(), d = completedAt.getDate();
-    const dateStr = typeof date === 'string' ? date : String(date);
-    const [year, month, day] = dateStr.split("-").map(Number);
-    return y === year && m === month - 1 && d === day;
-  });
-  // Aggregate all completed poses for today
-  let completed = 0;
-  todayProgress.forEach(doc => {
-    if (Array.isArray(doc.completedPoses)) {
-      completed += doc.completedPoses.length;
-    }
-  });
-  // Cap completed to total if user did more than total
-  if (completed > total) completed = total;
-  const rate = total > 0 ? Math.round((completed / total) * 100) : 0;
-  res.json({ date, total, completed, rate });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to fetch completion rate", error });
-    }
-  });
-
   // Authentication routes
   // In-memory store for pending signup OTPs (usernames -> { email, code, expiresAt })
   const pendingSignups = new Map<string, { email: string; code: string; expiresAt: number }>();
 
   // Request a signup verification code (OTP)
-  app.post("/api/auth/signup/request-code", async (req: express.Request, res: express.Response) => {
+  app.post("/api/auth/signup/request-code", async (req, res) => {
     try {
-      const { username, email, purpose } = req.body;
-      console.log('[DEBUG] /signup/request-code payload:', req.body);
-      if (!username || !email) {
-        return res.status(400).json({ error: 'Missing username or email' });
-      }
-      const db = getDb();
-      if (!db) return res.status(500).json({ error: 'Database not available' });
-      // Check if user exists
-      const existingUser = await db.collection('users').findOne({ username });
-      if (purpose === 'signup') {
-        if (existingUser) {
-          return res.status(400).json({ error: 'User already exists' });
+      const { username, email } = req.body || {};
+      if (!username || !email) return res.status(400).json({ message: "username and email are required" });
+
+      // Prevent duplicates: check both memory and Mongo for existing username
+      const exists = await storage.getUserByUsername(username);
+      if (exists) return res.status(400).json({ message: "Username already taken" });
+      try {
+        const db = getDb();
+        if (db) {
+          const mongoUser = await db.collection("users").findOne({ username });
+          if (mongoUser) return res.status(400).json({ message: "Username already taken" });
         }
-      } else if (purpose === 'password-change') {
-        if (!existingUser) {
-          return res.status(400).json({ error: 'User does not exist' });
-        }
-        // Optionally, verify email matches registered email
-        if (existingUser.email !== email) {
-          return res.status(400).json({ error: 'Email does not match registered email' });
-        }
-      }
-      // Generate OTP
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      // Store OTP in DB (with expiry)
-      await db.collection('otps').updateOne(
-        { username },
-        { $set: { otp, email, expiresAt: Date.now() + 10 * 60 * 1000 } },
-        { upsert: true }
-      );
-      console.log('[DEBUG] /signup/request-code OTP:', { username, email, otp });
-      // Send OTP email
-      await sendSignupOtpEmail(email, username, otp);
-      res.json({ success: true });
+      } catch {}
+
+      // Generate 6-digit code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+      pendingSignups.set(username, { email, code, expiresAt });
+
+      // Best-effort email
+      await sendSignupOtpEmail(email, username, code);
+      res.json({ ok: true, message: "Verification code sent" });
     } catch (e: any) {
       res.status(500).json({ message: e?.message || "Failed to send code" });
     }
   });
 
   // Verify code and complete registration
-  app.post("/api/auth/signup/verify", async (req: express.Request, res: express.Response) => {
+  app.post("/api/auth/signup/verify", async (req, res) => {
     try {
-      const { username, password, email, code, purpose } = req.body || {};
-      console.log('[DEBUG] /signup/verify payload:', req.body);
-      const db = getDb();
-      if (!db) return res.status(500).json({ message: "Database not available" });
-      // Always use MongoDB otps collection for OTP verification
-      const otpEntry = await db.collection("otps").findOne({ username, email });
-      console.log('[DEBUG] /signup/verify OTP entry:', otpEntry);
-      if (!otpEntry) return res.status(400).json({ message: "No OTP found for this user" });
-      if (Date.now() > otpEntry.expiresAt) {
-        await db.collection("otps").deleteOne({ username, email });
+      const { username, password, email, code } = req.body || {};
+      if (!username || !password || !email || !code) return res.status(400).json({ message: "username, password, email, code are required" });
+      const entry = pendingSignups.get(username);
+      if (!entry || entry.email !== email) return res.status(400).json({ message: "No pending signup for this user" });
+      if (Date.now() > entry.expiresAt) {
+        pendingSignups.delete(username);
         return res.status(400).json({ message: "Code expired" });
       }
-      if (otpEntry.otp !== code) return res.status(400).json({ message: "Invalid code" });
-      // Registration or password change
-      if (purpose === "password-change") {
-        // Update password in users collection
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await db.collection("users").updateOne(
-          { username },
-          { $set: { password: hashedPassword } }
-        );
-        await db.collection("otps").deleteOne({ username, email });
-        return res.json({ success: true });
-      } else {
-        // Registration flow
-        try {
-          if (db) {
-            const existingMongoUser = await db.collection("users").findOne({ username });
-            if (existingMongoUser) {
-              return res.status(400).json({ message: "Username already taken" });
-            }
+      if (entry.code !== code) return res.status(400).json({ message: "Invalid code" });
+
+      // Same validations as /register
+      try {
+        const db = getDb();
+        if (db) {
+          const existingMongoUser = await db.collection("users").findOne({ username });
+          if (existingMongoUser) {
+            return res.status(400).json({ message: "Username already taken" });
           }
-        } catch {}
-        const existingUser = await storage.getUserByUsername(username);
-        if (existingUser) return res.status(400).json({ message: "Username already taken" });
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const user = await storage.createUser({ username, password: hashedPassword, email });
-        try {
-          if (db) {
-            await db.collection("users").insertOne({
-              id: user.id,
-              username,
-              password: hashedPassword,
-              email: email || null,
-              createdAt: new Date().toISOString(),
-              emailVerifiedAt: new Date().toISOString(),
-            });
-          }
-        } catch (e) {
-          console.warn("[auth/signup/verify] Mongo mirror failed", (e as any)?.message || e);
         }
-        await db.collection("otps").deleteOne({ username, email });
-        const { password: _p, ...userResponse } = user;
-        res.status(201).json(userResponse);
+      } catch {}
+      const existingUser = await storage.getUserByUsername(username);
+      if (existingUser) return res.status(400).json({ message: "Username already taken" });
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const user = await storage.createUser({ username, password: hashedPassword, email });
+      try {
+        const db = getDb();
+        if (db) {
+          await db.collection("users").insertOne({
+            id: user.id,
+            username,
+            password: hashedPassword,
+            email: email || null,
+            createdAt: new Date().toISOString(),
+            emailVerifiedAt: new Date().toISOString(),
+          });
+        }
+      } catch (e) {
+        console.warn("[auth/signup/verify] Mongo mirror failed", (e as any)?.message || e);
       }
+
+      pendingSignups.delete(username);
+      const { password: _p, ...userResponse } = user;
+      res.status(201).json(userResponse);
     } catch (e: any) {
       res.status(500).json({ message: e?.message || "Signup verification failed" });
     }
   });
-  app.post("/api/auth/register", async (req: express.Request, res: express.Response) => {
+  app.post("/api/auth/register", async (req, res) => {
     try {
       const { username, password, email } = insertUserSchema.parse(req.body);
 
@@ -211,7 +151,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/auth/login", async (req: express.Request, res: express.Response) => {
+  app.post("/api/auth/login", async (req, res) => {
     try {
       const { username, password } = req.body;
       if (!username || !password) {
@@ -280,15 +220,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Assessment routes
-  app.post("/api/assessment", async (req: express.Request, res: express.Response) => {
+  app.post("/api/assessment", async (req, res) => {
     try {
-      console.log("[assessment] Incoming request body:", req.body);
       const assessment = insertAssessmentSchema.parse(req.body);
       // Forward assessment to ML API
-    const mlApiUrl = "https://ml-recommendation-2ywv.onrender.com/recommend";
-      console.log('[DEBUG] ML API URL:', mlApiUrl);
-      console.log('[DEBUG] ML API payload:', assessment);
-      const mlResponse = await fetch(mlApiUrl, {
+      const mlResponse = await fetch("http://localhost:8000/recommend", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(assessment)
@@ -303,29 +239,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       try {
         const db = getDb();
         if (db) {
-          await db.collection("recommended_poses").updateOne(
-            { userId: assessment.userId || req.body.username || null },
-            {
-              $set: {
-                poses: recommendations.recommendations || recommendations,
-                createdAt: new Date().toISOString(),
-              }
-            },
-            { upsert: true }
-          );
+          await db.collection("assessments").insertOne({
+            ...newAssessment,
+          });
         }
       } catch (e) {
-        console.warn("[assessment] Mongo recommended_poses upsert failed", e);
+        console.warn("[assessment] Mongo mirror failed", e);
       }
       // Return both assessment and recommendations
       res.json({ assessment: newAssessment, recommendations });
     } catch (error) {
-      console.error("[assessment] Validation or ML error:", error);
       res.status(400).json({ message: "Invalid assessment data or ML API error", error });
     }
   });
 
-  app.get("/api/assessment/:userId", async (req: express.Request, res: express.Response) => {
+  app.get("/api/assessment/:userId", async (req, res) => {
     try {
       const { userId } = req.params;
       const assessment = await storage.getAssessmentByUserId(userId);
@@ -340,7 +268,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Admin/maintenance endpoint to send exercise reminders to all registered users
   // In production, secure this route (auth/role). Left open here for simplicity.
-  app.post("/api/notify/reminders", async (_req: express.Request, res: express.Response) => {
+  app.post("/api/notify/reminders", async (_req, res) => {
     try {
       // Prefer Mongo users if available, fallback to in-memory
       let users = await storage.listUsers();
@@ -372,7 +300,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Debug: verify SMTP configuration
-  app.get("/api/debug/mail", async (_req: express.Request, res: express.Response) => {
+  app.get("/api/debug/mail", async (_req, res) => {
     const host = process.env.SMTP_HOST;
     const port = process.env.SMTP_PORT;
     const user = process.env.SMTP_USER ? "<set>" : "<missing>";
@@ -382,7 +310,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Debug: send a test email (provide ?to=email)
-  app.post("/api/debug/mail/test", async (req: express.Request, res: express.Response) => {
+  app.post("/api/debug/mail/test", async (req, res) => {
     try {
       const to = (req.query.to as string) || (req.body && req.body.to);
       if (!to) return res.status(400).json({ message: "Provide recipient via query ?to= or JSON { to }" });
@@ -394,34 +322,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Routine routes
-  app.get("/api/routines", async (_req: express.Request, res: express.Response) => {
+  app.get("/api/routines", async (_req, res) => {
     try {
-      const db = getDb();
-      let username = null;
-      // Use 'username' query param for user identification
-      if (_req.query && _req.query.username) {
-        username = _req.query.username;
-      }
-      if (db && username) {
-        // MongoDB stores username in 'userId' field
-        const rec = await db.collection("recommended_poses").find({ userId: username }).sort({ createdAt: -1 }).toArray();
-        // Return only the latest recommended poses for this user
-        if (rec.length > 0) {
-          return res.json(rec[0].poses);
-        } else {
-          return res.json([]);
-        }
-      } else {
-        // Fallback: return all routines (legacy)
-        const routines = await storage.getRoutines();
-        res.json(routines);
-      }
+      const routines = await storage.getRoutines();
+      res.json(routines);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch routines", error });
     }
   });
 
-  app.get("/api/routines/difficulty/:difficulty", async (req: express.Request, res: express.Response) => {
+  app.get("/api/routines/difficulty/:difficulty", async (req, res) => {
     try {
       const { difficulty } = req.params;
       const routines = await storage.getRoutinesByDifficulty(difficulty);
@@ -431,7 +341,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/routines/:id", async (req: express.Request, res: express.Response) => {
+  app.get("/api/routines/:id", async (req, res) => {
     try {
       const { id } = req.params;
       const routine = await storage.getRoutineById(id);
@@ -445,7 +355,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Poses routes - serve real yoga dataset
-  app.get("/api/poses", async (_req: express.Request, res: express.Response) => {
+  app.get("/api/poses", async (_req, res) => {
     try {
       const { yogaDataset } = await import("./yoga-dataset");
       res.json(yogaDataset);
@@ -454,7 +364,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/poses/:id", async (req: express.Request, res: express.Response) => {
+  app.get("/api/poses/:id", async (req, res) => {
     try {
       const { yogaDataset } = await import("./yoga-dataset");
       const { id } = req.params;
@@ -468,7 +378,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/poses/category/:category", async (req: express.Request, res: express.Response) => {
+  app.get("/api/poses/category/:category", async (req, res) => {
     try {
       const { yogaDataset } = await import("./yoga-dataset");
       const { category } = req.params;
@@ -481,7 +391,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/poses/difficulty/:difficulty", async (req: express.Request, res: express.Response) => {
+  app.get("/api/poses/difficulty/:difficulty", async (req, res) => {
     try {
       const { yogaDataset } = await import("./yoga-dataset");
       const { difficulty } = req.params;
@@ -495,7 +405,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ML Recommendations route using real yoga dataset
-  app.post("/api/recommendations", async (req: express.Request, res: express.Response) => {
+  app.post("/api/recommendations", async (req, res) => {
     try {
       // Removed local recommendation logic; recommendations should come from backend/ML API
       res.status(501).json({ error: 'Recommendation logic moved to backend/ML API.' });
@@ -506,7 +416,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Progress tracking routes
-  app.post("/api/progress", async (req: express.Request, res: express.Response) => {
+  app.post("/api/progress", async (req, res) => {
     try {
       const progress = insertUserProgressSchema.parse(req.body);
       const newProgress = await storage.createUserProgress(progress);
@@ -572,7 +482,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           );
           await db.collection("user_progress").insertOne({
             ...newProgress,
-            completedPoses: progress.completedPoses || [],
           });
         }
       } catch (e) {
@@ -601,27 +510,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/progress/:userId", async (req: express.Request, res: express.Response) => {
+  app.get("/api/progress/:userId", async (req, res) => {
     try {
-      const db = getDb();
-      if (!db) return res.status(500).json({ message: "Database not available" });
       const { userId } = req.params;
-      const progressDocs = await db.collection("user_progress").find({ userId }).toArray();
-      res.json(progressDocs);
+      const progress = await storage.getUserProgress(userId);
+      res.json(progress);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch progress", error });
     }
   });
 
   // Progress stats (current streak, longest streak, first-of-month flag)
-  app.get("/api/progress/stats/:userId", async (req: express.Request, res: express.Response) => {
+  app.get("/api/progress/stats/:userId", async (req, res) => {
     try {
-      const db = getDb();
-      if (!db) return res.status(500).json({ message: "Database not available" });
       const { userId } = req.params;
-      // Get all user progress from MongoDB
-      const progressDocs = await db.collection("user_progress").find({ userId }).toArray();
-      const dates = progressDocs
+      const allProgress = await storage.getUserProgress(userId);
+      const dates = allProgress
         .map((p) => new Date(p.completedAt ?? ""))
         .filter((d) => !isNaN(d.getTime()))
         .sort((a, b) => a.getTime() - b.getTime());
@@ -681,7 +585,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Daily progress summaries from MongoDB (optional)
-  app.get("/api/progress/daily/:userId", async (req: express.Request, res: express.Response) => {
+  app.get("/api/progress/daily/:userId", async (req, res) => {
     try {
       const { userId } = req.params;
       const days = Math.max(1, parseInt((req.query.days as string) || "30", 10));
@@ -701,7 +605,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Debug: verify Mongo connectivity and write access
-  app.get("/api/debug/mongo", async (_req: express.Request, res: express.Response) => {
+  app.get("/api/debug/mongo", async (_req, res) => {
     try {
       const db = getDb();
       if (!db) {

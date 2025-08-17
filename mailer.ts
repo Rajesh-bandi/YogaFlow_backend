@@ -1,11 +1,3 @@
-
-import * as dotenv from 'dotenv';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-dotenv.config({ path: join(__dirname, '.env') });
-console.log('[DEBUG] SMTP_HOST:', process.env.SMTP_HOST);
 import nodemailer from "nodemailer";
 
 const host = process.env.SMTP_HOST;
@@ -66,27 +58,16 @@ export async function sendExerciseReminderEmail(to: string, username: string) {
 
 export async function sendSignupOtpEmail(to: string, username: string, code: string) {
   try {
-    if (!host) {
-      console.error('[mail] SMTP host not configured, email disabled');
-      return;
-    }
+    if (!host) return; // email disabled if not configured
     const t = getTransporter();
-    console.log('[mail] transporter config:', {
-      host,
-      port,
-      user,
-      pass,
-      from
-    });
     console.log(`[mail] sending signup OTP to ${to}`);
-    const info = await t.sendMail({
+    await t.sendMail({
       from,
       to,
-      subject: 'Your YogaFlow verification code',
+      subject: "Your YogaFlow verification code",
       text: `Hi ${username},\n\nYour verification code is: ${code}\nIt expires in 10 minutes.\n\nIf you didn't request this, you can ignore this email.`,
       html: `<p>Hi <b>${username}</b>,</p><p>Your verification code is:</p><p style="font-size:20px;font-weight:700;letter-spacing:3px;">${code}</p><p>This code expires in <b>10 minutes</b>.</p><p>If you didn't request this, you can ignore this email.</p>`
     });
-    console.log('[mail] sendMail result:', info);
     console.log(`[mail] signup OTP sent to ${to}`);
   } catch (e) {
     console.error("sendSignupOtpEmail error", e);

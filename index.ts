@@ -1,28 +1,13 @@
-
-
-import * as dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-dotenv.config({ path: join(__dirname, '.env') });
-
+import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
-import cors from "cors";
 import { registerRoutes } from "./routes";
 import { connectMongo } from "./mongo";
 import { scheduleDailyReminders } from "./scheduler";
 import { setupVite, serveStatic, log } from "./vite";
 
 const app = express();
-// Allow requests from frontend (adjust origin as needed)
-app.use(cors({ origin: ["http://localhost:5173", "http://localhost:5001"], credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-
-// Serve yoga images statically
-app.use("/yoga", express.static(join(__dirname, "yoga")));
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -84,20 +69,20 @@ function listRoutes(app: any) {
   // Optional: connect to MongoDB if env provided
   const mongoUri = process.env.MONGO_URI;
   const mongoDb = process.env.MONGO_DB || "flexflow";
-  console.log("[DEBUG] MONGO_URI:", mongoUri);
   if (mongoUri) {
     try {
-      const db = await connectMongo(mongoUri, mongoDb);
-      log(`connected to MongoDB (${mongoDb})`);
-      // Ensure index for daily progress
-      await db.collection("daily_progress").createIndex({ userId: 1, day: 1 }, { unique: true });
-      // Helpful indexes
-      await db.collection("users").createIndex({ username: 1 }, { unique: true });
-      await db.collection("user_progress").createIndex({ userId: 1, completedAt: 1 });
+  const db = await connectMongo(mongoUri, mongoDb);
+  log(`connected to MongoDB (${mongoDb})`);
+  // Ensure index for daily progress
+  await db.collection("daily_progress").createIndex({ userId: 1, day: 1 }, { unique: true });
+  // Helpful indexes
+  await db.collection("users").createIndex({ username: 1 }, { unique: true });
+  await db.collection("user_progress").createIndex({ userId: 1, completedAt: 1 });
     } catch (e) {
       log(`failed to connect MongoDB: ${(e as Error).message}`);
     }
-  } else {
+  }
+  else {
     log("MongoDB not configured. Set MONGO_URI (and optional MONGO_DB) to enable persistence.");
   }
 
