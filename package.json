@@ -25,7 +25,8 @@
   "node-cron": "^3.0.3",
   "mongodb": "^6.10.0",
   "bcrypt": "^5.1.1",
-  "drizzle-orm": "^0.39.1"
+  "drizzle-orm": "^0.39.1",
+  "vite": "^4.5.0"
   },
   "optionalDependencies": {
     "bufferutil": "^4.0.8"
