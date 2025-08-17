@@ -1,4 +1,4 @@
-import { type User, type InsertUser, type Assessment, type InsertAssessment, type Routine, type InsertRoutine, type UserProgress, type InsertUserProgress } from "server/schema";
+import { type User, type InsertUser, type Assessment, type InsertAssessment, type Routine, type InsertRoutine, type UserProgress, type InsertUserProgress } from "./schema";
 import { randomUUID } from "crypto";
 
 export interface IStorage {
@@ -158,6 +158,7 @@ export class MemStorage implements IStorage {
       userId: progress.userId || null,
       routineId: progress.routineId || null,
       rating: progress.rating || null,
+      completedPoses: progress.completedPoses ?? null,
       id,
       completedAt: new Date().toISOString()
     };

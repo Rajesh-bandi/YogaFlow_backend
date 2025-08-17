@@ -6,7 +6,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { sendExerciseReminderEmail, sendLoginThanksEmail, verifyMailConfig, sendTestEmail, sendSignupOtpEmail, sendRoutineCompletionEmail } from "./mailer";
 import { getDb } from "./mongo";
-import { insertAssessmentSchema, insertUserProgressSchema, insertUserSchema } from "server/schema";
+import { insertAssessmentSchema, insertUserProgressSchema, insertUserSchema } from "./schema";
 import bcrypt from "bcrypt";
 
 export async function registerRoutes(app: Express): Promise<Server> {
